@@ -1,16 +1,15 @@
 import math
 import random
+import time
 from sympy import primerange
-from itertools import product
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def base_base(n, c=3.38):
     ln_n = math.log(n)
     ln_ln_n = math.log(ln_n)
     B = c * math.exp(0.5 * math.sqrt(ln_n * ln_ln_n))
-    p_i = list(primerange(2, B))
-    return p_i
+    return list(primerange(2, int(B)))
 
 
 def is_smooth(value, base):
@@ -19,97 +18,129 @@ def is_smooth(value, base):
         while value % p == 0:
             value //= p
             exp_vector[i] += 1
-    if value == 1:
-        return exp_vector
-    return None
+    return exp_vector if value == 1 else None
 
 
-def generate_one_equation(alpha, mod, p_i):
+def generate_relation(alpha, mod, base):
     while True:
         k = random.randint(1, mod - 1)
         ak = pow(alpha, k, mod)
-        exp_vector = is_smooth(ak, p_i)
-        if exp_vector is not None:
+        exp_vector = is_smooth(ak, base)
+        if exp_vector:
             return exp_vector, k
 
 
-def generate_linear_system_parallel(alpha, mod, p_i, num_eq):
-    equations = []
-    ks = []
-    with ProcessPoolExecutor() as executor:
-        while len(equations) < num_eq:
-            futures = [executor.submit(generate_one_equation, alpha, mod, p_i) for _ in range(num_eq - len(equations))]
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    exp_vec, k = result
-                    equations.append(exp_vec)
-                    ks.append(k)
+def generate_linear_system_parallel(alpha, mod, base, num_eq, workers=4):
+    equations, ks = [], []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(generate_relation, alpha, mod, base) for _ in range(num_eq * 2)]
+        for future in as_completed(futures):
+            exp_vector, k = future.result()
+            equations.append(exp_vector)
+            ks.append(k)
+            if len(equations) >= num_eq:
+                break
     return equations, ks
 
 
-def brute_force_solve(matrix, vector, mod):
-    n = len(matrix[0])
-    for candidate in product(range(mod), repeat=n):
-        ok = True
-        for row, b in zip(matrix, vector):
-            if sum((a * x for a, x in zip(row, candidate))) % mod != b % mod:
-                ok = False
-                break
-        if ok:
-            return list(candidate)
+def gcd(a, b):
+    u0, u1 = 1, 0
+    v0, v1 = 0, 1
+    while b != 0:
+        q, a, b = a // b, b, a % b
+        u0, u1 = u1, u0 - q * u1
+        v0, v1 = v1, v0 - q * v1
+    return a, u0, v0
+
+
+def mod_inverse(a, mod):
+    d, u, _ = gcd(a, mod)
+    return u % mod if d == 1 else None
+
+
+def solve_linear_mod_system(A, b, mod):
+    A = [row[:] for row in A]
+    b = b[:]
+    n, m = len(A), len(A[0])
+
+    for i in range(min(n, m)):
+        pivot = next((r for r in range(i, n) if A[r][i] % mod != 0), None)
+        if pivot is None:
+            continue
+        if pivot != i:
+            A[i], A[pivot] = A[pivot], A[i]
+            b[i], b[pivot] = b[pivot], b[i]
+
+        inv = mod_inverse(A[i][i], mod)
+        if inv is None:
+            continue
+
+        A[i] = [(val * inv) % mod for val in A[i]]
+        b[i] = (b[i] * inv) % mod
+
+        for r in range(n):
+            if r != i:
+                factor = A[r][i]
+                A[r] = [(A[r][c] - factor * A[i][c]) % mod for c in range(m)]
+                b[r] = (b[r] - factor * b[i]) % mod
+
+    return [b[i] % mod for i in range(m)]
+
+
+def try_log_beta(alpha, beta, mod, base, log_base):
+    while True:
+        k = random.randint(0, mod - 1)
+        val = (beta * pow(alpha, k, mod)) % mod
+        di = is_smooth(val, base)
+        if di:
+            log_beta_val = (sum(d * lp for d, lp in zip(di, log_base)) - k) % (mod - 1)
+            return log_beta_val, k, di, val
+
+
+def index_calculus(alpha, beta, n, max_time=300, threads=4):
+    mod = n
+    base = base_base(n)
+    t = len(base)
+
+    print("Факторна база S =", base)
+
+    start_time = time.time()
+    attempt = 0
+
+    while time.time() - start_time < max_time:
+        attempt += 1
+        print(f"\nСпроба №{attempt} — генерація системи...")
+
+        equations, ks = generate_linear_system_parallel(alpha, mod, base, t + 5, workers=threads)
+
+        solution = solve_linear_mod_system(equations, ks, n - 1)
+        if not solution:
+            print("Не вдалося розв’язати систему.")
+            continue
+
+        print("logα(p_i):")
+        for pi, log_val in zip(base, solution):
+            print(f"logα({pi}) = {log_val} mod {n - 1}")
+
+        print("Обчислення logα(beta)...")
+        log_beta_val, _, _, _ = try_log_beta(alpha, beta, mod, base, solution)
+
+        if pow(alpha, log_beta_val, mod) == beta:
+            total_time = time.time() - start_time
+            print(f"Відповідь: logα({beta}) = {log_beta_val} (mod {n - 1})")
+            print(f"Час виконання: {total_time:.2f} секунд")
+            return log_beta_val
+
+        print("Перевірка не пройдена, спроба ще раз...")
+
+    total_time = time.time() - start_time
+    print("Час вичерпано. Відповідь не знайдена.")
+    print(f"Загальний час: {total_time:.2f} секунд")
     return None
 
 
-def try_log_beta(alpha, beta, mod, p_i, log_p_i):
-    n = mod
-    while True:
-        k = random.randint(0, n - 1)
-        val = (beta * pow(alpha, k, n)) % n
-        di = is_smooth(val, p_i)
-        if di is not None:
-            log_beta = sum(d * lp for d, lp in zip(di, log_p_i)) - k
-            return log_beta % (n - 1), k, di, val
-
-
-def log_beta_parallel(alpha, beta, mod, p_i, log_p_i):
-    with ProcessPoolExecutor() as executor:
-        while True:
-            futures = [executor.submit(try_log_beta, alpha, beta, mod, p_i, log_p_i) for _ in range(10)]
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    return result
-
-
 if __name__ == "__main__":
-    alpha = 10
-    beta = 17
-    n = 47
-    mod = n
-    p_i = base_base(n)
-    t = len(p_i)
-
-    print("Факторна база S =", p_i)
-
-    equations, ks = generate_linear_system_parallel(alpha, mod, p_i, t + 5)
-
-    print("\nСистема лінійних рівнянь:")
-    for i in range(len(equations)):
-        lhs = f"{ks[i]}"
-        rhs = " + ".join(f"{eq}*logα({p})" for eq, p in zip(equations[i], p_i) if eq > 0)
-        print(f"{lhs} = {rhs} mod {n - 1}")
-
-    solution = brute_force_solve(equations, ks, n - 1)
-
-    print("\n(logα(p_i) mod", n - 1, "):")
-    if solution:
-        for pi, log_val in zip(p_i, solution):
-            print(f"logα({pi}) = {log_val} mod {n - 1}")
-    else:
-        print("Розв’язок не знайдено")
-        exit(1)
-
-    log_b, l, di, val = log_beta_parallel(alpha, beta, mod, p_i, solution)
-
-    print(f"\nВідповідь : logα({beta}) = {log_b} (mod {mod - 1})")
+    alpha = 201
+    beta = 627
+    n = 733
+    index_calculus(alpha, beta, n, max_time=300, threads=4)
